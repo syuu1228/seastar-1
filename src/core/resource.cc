@@ -313,6 +313,7 @@ static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_ma
     auto local_memory = node->memory.local_memory;
 #endif
     auto taken = std::min(local_memory - used_mem[node], alloc);
+    seastar_logger.debug("alloc_from_node() this_cpu={}, node={} alloc={} taken={}", this_cpu.cpu_id, node->os_index, alloc, taken);
     if (taken) {
         used_mem[node] += taken;
         auto node_id = hwloc_bitmap_first(node->nodeset);
@@ -572,6 +573,7 @@ resources allocate(configuration& c) {
         throw std::runtime_error("number of processing units must be positive");
     }
     auto machine_depth = hwloc_get_type_depth(topology, HWLOC_OBJ_MACHINE);
+    seastar_logger.debug("hwloc_get_type_or_above_depth(HWLOC_OBJ_MACHINE) machine_depth={}", machine_depth);
     assert(hwloc_get_nbobjs_by_depth(topology, machine_depth) == 1);
     auto machine = hwloc_get_obj_by_depth(topology, machine_depth, 0);
 #if HWLOC_API_VERSION >= 0x00020000
@@ -620,6 +622,7 @@ resources allocate(configuration& c) {
 
         hwloc_obj_t tmp = NULL;
         auto depth = hwloc_get_type_or_above_depth(topology, HWLOC_OBJ_NUMANODE);
+        seastar_logger.debug("hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE)  depth={}", depth);
         while ((tmp = hwloc_get_next_obj_by_depth(topology, depth, tmp)) != NULL) {
             nodes.push_back(tmp);
         }
@@ -661,21 +664,28 @@ resources allocate(configuration& c) {
         auto node = cpu_to_node.at(cpu_id);
         cpu this_cpu;
         this_cpu.cpu_id = cpu_id;
+        seastar_logger.debug("loop precall alloc_from_node() cpu={} node={}", this_cpu.cpu_id, node->os_index);
         size_t remain = mem_per_proc - alloc_from_node(this_cpu, node, topo_used_mem, mem_per_proc);
 
+        seastar_logger.debug("loop postcall alloc_from_node() cpu:{} node={} remain={}", cpu_id, node->os_index, remain);
         remains.emplace_back(std::move(this_cpu), remain);
     }
 
     // Divide the rest of the memory
     auto depth = hwloc_get_type_or_above_depth(topology, HWLOC_OBJ_NUMANODE);
+    seastar_logger.debug("hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE) depth={}", depth);
     for (auto&& [this_cpu, remain] : remains) {
         auto node = cpu_to_node.at(this_cpu.cpu_id);
         auto obj = node;
 
+        seastar_logger.debug("loop cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
         while (remain) {
+            seastar_logger.debug("loop2 precall alloc_from_node() cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
             remain -= alloc_from_node(this_cpu, obj, topo_used_mem, remain);
+            seastar_logger.debug("loop2 postcall alloc_from_node() this_cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
             do {
                 obj = hwloc_get_next_obj_by_depth(topology, depth, obj);
+                seastar_logger.debug("loop3 hwloc_get_next_obj_by_depth() depth={} remain={}", depth, remain);
             } while (!obj);
             if (obj == node)
                 break;
