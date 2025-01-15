@@ -513,13 +513,13 @@ topology_holder& topology_holder::operator=(topology_holder&& o) noexcept {
 }
 
 void topology_holder::init_and_load() {
-    hwloc_topology_init(&_topology);
-    seastar_logger.debug("topology_holder::init_and_load() hwloc_topology_init()");
+    auto res = hwloc_topology_init(&_topology);
+    seastar_logger.debug("topology_holder::init_and_load() hwloc_topology_init() res={}", res);
     // hwloc_topology_destroy is required after hwloc_topology_init
     // on success, _topology will not be null anymore
 
-    hwloc_topology_load(_topology);
-    seastar_logger.debug("topology_holder::init_and_load() hwloc_topology_load()");
+    auto res2 = hwloc_topology_load(_topology);
+    seastar_logger.debug("topology_holder::init_and_load() hwloc_topology_load() res={}", res2);
 }
 
 hwloc_topology_t topology_holder::get() {
