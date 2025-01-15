@@ -317,6 +317,7 @@ static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_ma
     if (taken) {
         used_mem[node] += taken;
         auto node_id = hwloc_bitmap_first(node->nodeset);
+        seastar_logger.debug("alloc_from_node() hwloc_bitmap_first()");
         assert(node_id != -1);
         this_cpu.mem.push_back({taken, unsigned(node_id)});
     }
@@ -328,8 +329,11 @@ static hwloc_obj_t get_numa_node_for_pu(hwloc_topology_t topology, hwloc_obj_t p
     // Can't use ancestry because hwloc 2.0 NUMA nodes are not ancestors of PUs
     hwloc_obj_t tmp = NULL;
     auto depth = hwloc_get_type_or_above_depth(topology, HWLOC_OBJ_NUMANODE);
+    seastar_logger.debug("get_numa_node_for_pu() hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE) depth={}", depth);
     while ((tmp = hwloc_get_next_obj_by_depth(topology, depth, tmp)) != NULL) {
+        seastar_logger.debug("get_numa_node_for_pu() hwloc_get_next_obj_by_depth() depth={}", depth);
         if (hwloc_bitmap_intersects(tmp->cpuset, pu->cpuset)) {
+            seastar_logger.debug("get_numa_node_for_pu() hwloc_bitmap_intersects()");
             return tmp;
         }
     }
@@ -338,6 +342,7 @@ static hwloc_obj_t get_numa_node_for_pu(hwloc_topology_t topology, hwloc_obj_t p
 
 static hwloc_obj_t hwloc_get_ancestor(hwloc_obj_type_t type, hwloc_topology_t topology, unsigned cpu_id) {
     auto cur = hwloc_get_pu_obj_by_os_index(topology, cpu_id);
+    seastar_logger.debug("hwloc_get_ancestor() hwloc_get_pu_obj_by_os_index() cpu_id={}", cpu_id);
 
     while (cur != nullptr) {
         if (cur->type == type) {
@@ -355,6 +360,7 @@ static std::unordered_map<hwloc_obj_t, std::vector<unsigned>> break_cpus_into_gr
 
     for (auto&& cpu_id : cpus) {
         hwloc_obj_t anc = hwloc_get_ancestor(type, topology, cpu_id);
+        seastar_logger.debug("break_cpus_into_groups() hwloc_get_ancestor() cpu_id={}", cpu_id);
         groups[anc].push_back(cpu_id);
     }
 
@@ -367,9 +373,11 @@ struct distribute_objects {
 
     distribute_objects(hwloc_topology_t topology, size_t nobjs) : cpu_sets(nobjs), root(hwloc_get_root_obj(topology)) {
 #if HWLOC_API_VERSION >= 0x00010900
-        hwloc_distrib(topology, &root, 1, cpu_sets.data(), cpu_sets.size(), INT_MAX, 0);
+        auto res = hwloc_distrib(topology, &root, 1, cpu_sets.data(), cpu_sets.size(), INT_MAX, 0);
+        seastar_logger.debug("distribute_objects() hwloc_distrib() res={}", res);
 #else
-        hwloc_distribute(topology, root, cpu_sets.data(), cpu_sets.size(), INT_MAX);
+        auto res = hwloc_distribute(topology, root, cpu_sets.data(), cpu_sets.size(), INT_MAX);
+        seastar_logger.debug("distribute_objects() hwloc_distribute() res={}", res);
 #endif
     }
 
@@ -388,6 +396,7 @@ allocate_io_queues(hwloc_topology_t topology, std::vector<cpu> cpus, std::unorde
         unsigned num_io_groups, unsigned& last_node_idx) {
     auto node_of_shard = [&cpus, &cpu_to_node] (unsigned shard) {
         auto node = cpu_to_node.at(cpus[shard].cpu_id);
+        seastar_logger.debug("allocate_io_queues() hwloc_bitmap_first()");
         return hwloc_bitmap_first(node->nodeset);
     };
 
@@ -505,10 +514,12 @@ topology_holder& topology_holder::operator=(topology_holder&& o) noexcept {
 
 void topology_holder::init_and_load() {
     hwloc_topology_init(&_topology);
+    seastar_logger.debug("topology_holder::init_and_load() hwloc_topology_init()");
     // hwloc_topology_destroy is required after hwloc_topology_init
     // on success, _topology will not be null anymore
 
     hwloc_topology_load(_topology);
+    seastar_logger.debug("topology_holder::init_and_load() hwloc_topology_load()");
 }
 
 hwloc_topology_t topology_holder::get() {
@@ -527,10 +538,12 @@ numa_node_id_to_cpuset(hwloc_topology_t topo) {
     for (auto numa_node = hwloc_get_next_obj_by_type(topo, HWLOC_OBJ_NUMANODE, NULL);
             numa_node;
             numa_node = hwloc_get_next_obj_by_type(topo, HWLOC_OBJ_NUMANODE, numa_node)) {
+        seastar_logger.debug("numa_node_id_to_cpuset() hwloc_get_next_obj_by_type(HWLOC_OBJ_NUMANODE)");
         auto parent = numa_node->parent;
         auto cpuset = parent->cpuset;
         cpu_set_t os_cpuset;
         hwloc_cpuset_to_glibc_sched_affinity(topo, cpuset, &os_cpuset, sizeof(os_cpuset));
+        seastar_logger.debug("numa_node_id_to_cpuset() hwloc_cpuset_to_glibc_sched_affinity()");
         for (unsigned idx = 0; idx < CPU_SETSIZE; ++idx) {
             if (CPU_ISSET(idx, &os_cpuset)) {
                 ret[numa_node->os_index].insert(idx);
@@ -543,9 +556,11 @@ numa_node_id_to_cpuset(hwloc_topology_t topo) {
 resources allocate(configuration& c) {
     auto topology = c.topology.get();
     auto bm = hwloc_bitmap_alloc();
+    seastar_logger.debug("0 hwloc_bitmap_alloc()");
     auto free_bm = defer([&] () noexcept { hwloc_bitmap_free(bm); });
     for (auto idx : c.cpu_set) {
         hwloc_bitmap_set(bm, idx);
+        seastar_logger.debug("0 hwloc_bitmap_set()");
     }
     auto r = hwloc_topology_restrict(topology, bm,
 #if HWLOC_API_VERSION >= 0x00020000
@@ -555,6 +570,7 @@ resources allocate(configuration& c) {
 #endif
             | HWLOC_RESTRICT_FLAG_ADAPT_MISC
             | HWLOC_RESTRICT_FLAG_ADAPT_IO);
+    seastar_logger.debug("0 hwloc_topology_restrict() r={}", r);
     if (r == -1) {
         if (errno == ENOMEM) {
             throw std::bad_alloc();
@@ -569,13 +585,16 @@ resources allocate(configuration& c) {
         procs > available_procs) {
         throw std::runtime_error(format("insufficient processing units: needed {} available {}", procs, available_procs));
     }
+    seastar_logger.debug("0 hwloc_get_nbobjs_by_type(HWLOC_OBJ_PU)");
     if (procs == 0) {
         throw std::runtime_error("number of processing units must be positive");
     }
     auto machine_depth = hwloc_get_type_depth(topology, HWLOC_OBJ_MACHINE);
-    seastar_logger.debug("hwloc_get_type_or_above_depth(HWLOC_OBJ_MACHINE) machine_depth={}", machine_depth);
+    seastar_logger.debug("0 hwloc_get_type_or_above_depth(HWLOC_OBJ_MACHINE) machine_depth={}", machine_depth);
     assert(hwloc_get_nbobjs_by_depth(topology, machine_depth) == 1);
+    seastar_logger.debug("0 hwloc_get_nbobjs_by_depth() machine_depth={}", machine_depth);
     auto machine = hwloc_get_obj_by_depth(topology, machine_depth, 0);
+    seastar_logger.debug("0 hwloc_get_obj_by_depth() machine_depth={}", machine_depth);
 #if HWLOC_API_VERSION >= 0x00020000
     auto available_memory = machine->total_memory;
 #else
@@ -597,11 +616,14 @@ resources allocate(configuration& c) {
 
     for (auto&& cs : cpu_sets()) {
         auto cpu_id = hwloc_bitmap_first(cs);
+        seastar_logger.debug("0 hwloc_bitmap_first() cpu_id={}", cpu_id);
         assert(cpu_id != -1);
         auto pu = hwloc_get_pu_obj_by_os_index(topology, cpu_id);
+        seastar_logger.debug("0 hwloc_get_pu_obj_by_os_index() cpu_id={}", cpu_id);
         auto node = get_numa_node_for_pu(topology, pu);
         if (node == nullptr) {
             orphan_pus.push_back(cpu_id);
+            seastar_logger.debug("CPU{} pushed to orphan_pus", cpu_id);
         } else {
             cpu_to_node[cpu_id] = node;
             seastar_logger.debug("Assign CPU{} to NUMA{}", cpu_id, node->os_index);
@@ -622,10 +644,12 @@ resources allocate(configuration& c) {
 
         hwloc_obj_t tmp = NULL;
         auto depth = hwloc_get_type_or_above_depth(topology, HWLOC_OBJ_NUMANODE);
-        seastar_logger.debug("hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE)  depth={}", depth);
+        seastar_logger.debug("1 hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE) depth={}", depth);
         while ((tmp = hwloc_get_next_obj_by_depth(topology, depth, tmp)) != NULL) {
+            seastar_logger.debug("1 hwloc_get_next_obj_by_depth() depth={}", depth);
             nodes.push_back(tmp);
         }
+        seastar_logger.debug("1 node size:{}", nodes.size());
 
         // Group orphan CPUs by ... some sane enough feature
         std::unordered_map<hwloc_obj_t, std::vector<unsigned>> grouped;
@@ -660,32 +684,33 @@ resources allocate(configuration& c) {
     // Divide local memory to cpus
     for (auto&& cs : cpu_sets()) {
         auto cpu_id = hwloc_bitmap_first(cs);
+        seastar_logger.debug("2 hwloc_bitmap_first() cpu_id={}", cpu_id);
         assert(cpu_id != -1);
         auto node = cpu_to_node.at(cpu_id);
         cpu this_cpu;
         this_cpu.cpu_id = cpu_id;
-        seastar_logger.debug("loop precall alloc_from_node() cpu={} node={}", this_cpu.cpu_id, node->os_index);
+        seastar_logger.debug("2 loop precall alloc_from_node() cpu={} node={}", this_cpu.cpu_id, node->os_index);
         size_t remain = mem_per_proc - alloc_from_node(this_cpu, node, topo_used_mem, mem_per_proc);
 
-        seastar_logger.debug("loop postcall alloc_from_node() cpu:{} node={} remain={}", cpu_id, node->os_index, remain);
+        seastar_logger.debug("2 loop postcall alloc_from_node() cpu:{} node={} remain={}", cpu_id, node->os_index, remain);
         remains.emplace_back(std::move(this_cpu), remain);
     }
 
     // Divide the rest of the memory
     auto depth = hwloc_get_type_or_above_depth(topology, HWLOC_OBJ_NUMANODE);
-    seastar_logger.debug("hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE) depth={}", depth);
+    seastar_logger.debug("3 hwloc_get_type_or_above_depth(HWLOC_OBJ_NUMANODE) depth={}", depth);
     for (auto&& [this_cpu, remain] : remains) {
         auto node = cpu_to_node.at(this_cpu.cpu_id);
         auto obj = node;
 
-        seastar_logger.debug("loop cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
+        seastar_logger.debug("3 loop cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
         while (remain) {
-            seastar_logger.debug("loop2 precall alloc_from_node() cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
+            seastar_logger.debug("3 loop2 precall alloc_from_node() cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
             remain -= alloc_from_node(this_cpu, obj, topo_used_mem, remain);
-            seastar_logger.debug("loop2 postcall alloc_from_node() this_cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
+            seastar_logger.debug("3 loop2 postcall alloc_from_node() this_cpu={} node={} remain={}", this_cpu.cpu_id, node->os_index, remain);
             do {
                 obj = hwloc_get_next_obj_by_depth(topology, depth, obj);
-                seastar_logger.debug("loop3 hwloc_get_next_obj_by_depth() depth={} remain={}", depth, remain);
+                seastar_logger.debug("3 loop3 hwloc_get_next_obj_by_depth() depth={} remain={}", depth, remain);
             } while (!obj);
             if (obj == node)
                 break;
@@ -705,6 +730,7 @@ resources allocate(configuration& c) {
 }
 
 unsigned nr_processing_units(configuration& c) {
+    seastar_logger.debug("hwloc_get_nbobjs_by_type(HWLOC_OBJ_PU)");
     return hwloc_get_nbobjs_by_type(c.topology.get(), HWLOC_OBJ_PU);
 }
 
