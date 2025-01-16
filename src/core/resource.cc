@@ -629,6 +629,7 @@ resources allocate(configuration& c) {
         } else {
             cpu_to_node[cpu_id] = node;
             seastar_logger.debug("Assign CPU{} to NUMA{}", cpu_id, node->os_index);
+            seastar_logger.debug("node os_index={} total_memory={} depth={} logical_index={} gp_index={}", node->os_index, node->total_memory, node->depth, node->logical_index, node->gp_index);
         }
     }
 
