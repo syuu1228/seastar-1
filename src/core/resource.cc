@@ -313,7 +313,7 @@ static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_ma
     auto local_memory = node->memory.local_memory;
 #endif
     auto taken = std::min(local_memory - used_mem[node], alloc);
-    seastar_logger.debug("alloc_from_node() this_cpu={}, node={} alloc={} taken={}", this_cpu.cpu_id, node->os_index, alloc, taken);
+    seastar_logger.debug("alloc_from_node() this_cpu={}, node={} alloc={} local_memory={} used_mem={} taken={}", this_cpu.cpu_id, node->os_index, alloc, local_memory, used_mem[node], taken);
     if (taken) {
         used_mem[node] += taken;
         auto node_id = hwloc_bitmap_first(node->nodeset);
@@ -321,6 +321,7 @@ static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_ma
         assert(node_id != -1);
         this_cpu.mem.push_back({taken, unsigned(node_id)});
     }
+    seastar_logger.debug("alloc_from_node() returns {}", taken);
     return taken;
 }
 
@@ -605,6 +606,7 @@ resources allocate(configuration& c) {
     // limit memory address to fit in 36-bit, see core/memory.cc:Memory map
     constexpr size_t max_mem_per_proc = 1UL << 36;
     auto mem_per_proc = std::min(align_down<size_t>(mem / procs, 2 << 20), max_mem_per_proc);
+    seastar_logger.debug("0 mem_per_proc={}", mem_per_proc);
 
     resources ret;
     std::unordered_map<unsigned, hwloc_obj_t> cpu_to_node;
@@ -689,7 +691,7 @@ resources allocate(configuration& c) {
         auto node = cpu_to_node.at(cpu_id);
         cpu this_cpu;
         this_cpu.cpu_id = cpu_id;
-        seastar_logger.debug("2 loop precall alloc_from_node() cpu={} node={}", this_cpu.cpu_id, node->os_index);
+        seastar_logger.debug("2 loop precall alloc_from_node() cpu={} node={} mem_per_proc={}", this_cpu.cpu_id, node->os_index, mem_per_proc);
         size_t remain = mem_per_proc - alloc_from_node(this_cpu, node, topo_used_mem, mem_per_proc);
 
         seastar_logger.debug("2 loop postcall alloc_from_node() cpu:{} node={} remain={}", cpu_id, node->os_index, remain);
