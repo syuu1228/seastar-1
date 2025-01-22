@@ -305,13 +305,26 @@ size_t div_roundup(size_t num, size_t denom) {
     return (num + denom - 1) / denom;
 }
 
-static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_map<hwloc_obj_t, size_t>& used_mem, size_t alloc) {
+static inline hwloc_uint64_t get_local_memory_from_node(hwloc_obj_t node) {
 #if HWLOC_API_VERSION >= 0x00020000
     // FIXME: support nodes with multiple NUMA nodes, whatever that means
     auto local_memory = node->total_memory;
 #else
     auto local_memory = node->memory.local_memory;
 #endif
+    return local_memory;
+}
+
+static inline void set_local_memory_to_node(hwloc_obj_t node, hwloc_uint64_t local_memory) {
+#if HWLOC_API_VERSION >= 0x00020000
+    node->total_memory = local_memory;
+#else
+    node->memory.local_memory = local_memory;
+#endif
+}
+
+static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_map<hwloc_obj_t, size_t>& used_mem, size_t alloc) {
+    auto local_memory = get_local_memory_from_node(node);
     auto taken = std::min(local_memory - used_mem[node], alloc);
     if (taken) {
         used_mem[node] += taken;
@@ -579,6 +592,10 @@ resources allocate(configuration& c) {
 #else
     auto available_memory = machine->memory.total_memory;
 #endif
+    if (!available_memory) {
+        available_memory = ::sysconf(_SC_PAGESIZE) * size_t(::sysconf(_SC_PHYS_PAGES));
+        seastar_logger.warn("hwloc failed to detect machine-wide memory size, using memory size fetched from sysconf");
+    }
     size_t mem = calculate_memory(c, std::min(available_memory,
                                               cgroup::memory_limit()));
     // limit memory address to fit in 36-bit, see core/memory.cc:Memory map
@@ -601,6 +618,14 @@ resources allocate(configuration& c) {
         if (node == nullptr) {
             orphan_pus.push_back(cpu_id);
         } else {
+            if (!get_local_memory_from_node(node)) {
+                // This code does not assume that there are multiple nodes,
+                // but when this 'if' condition is met, hwloc fails to detect
+                // the hardware configuration and is expected to operate as
+                // a single node configuration, so it should work correctly.
+                set_local_memory_to_node(node, available_memory);
+                seastar_logger.warn("hwloc failed to detect a memory size on NUMA node{}, using memory size fetched from sysconf", node->os_index);
+            }
             cpu_to_node[cpu_id] = node;
             seastar_logger.debug("Assign CPU{} to NUMA{}", cpu_id, node->os_index);
         }
