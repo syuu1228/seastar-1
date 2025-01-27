@@ -610,6 +610,7 @@ resources allocate(configuration& c) {
 
     auto cpu_sets = distribute_objects(topology, procs);
 
+    int failed_node_count = 0;
     for (auto&& cs : cpu_sets()) {
         auto cpu_id = hwloc_bitmap_first(cs);
         assert(cpu_id != -1);
@@ -623,6 +624,9 @@ resources allocate(configuration& c) {
                 // but when this 'if' condition is met, hwloc fails to detect
                 // the hardware configuration and is expected to operate as
                 // a single node configuration, so it should work correctly.
+                failed_node_count++;
+                seastar_logger.debug("failed_node_count:{}", failed_node_count);
+                assert(failed_node_count > 1);
                 set_local_memory_to_node(node, available_memory);
                 seastar_logger.warn("hwloc failed to detect a memory size on NUMA node{}, using memory size fetched from sysconf", node->os_index);
             }
