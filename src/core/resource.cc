@@ -94,7 +94,6 @@ std::optional<cpuset> parse_cpuset(std::string value) {
     }
     return std::nullopt;
 }
-
 }
 
 namespace cgroup {
@@ -305,13 +304,121 @@ size_t div_roundup(size_t num, size_t denom) {
     return (num + denom - 1) / denom;
 }
 
-static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_map<hwloc_obj_t, size_t>& used_mem, size_t alloc) {
-#if HWLOC_API_VERSION >= 0x00020000
-    // FIXME: support nodes with multiple NUMA nodes, whatever that means
-    auto local_memory = node->total_memory;
-#else
-    auto local_memory = node->memory.local_memory;
+#if 0
+static bool is_readable_file(const seastar::sstring& path) {
+    return !::access(path.c_str(), R_OK);
+}
 #endif
+
+// We found that hwloc does not provide correct information when cpu topology
+// is not available on /sys.
+// Such an environment exists on aarch64 EC2 instance running Fedora AMI.
+// hwloc can detect cpu topology is missing, and print error message, but it
+// just always return 0 on initializer function (hwloc_topology_init) so we
+// cannot receive error from the API.
+// Therefore, we have to detect cpu topology availability in our code.
+static bool is_cpu_topology_available() {
+#if 0
+    const std::string cpux_properties[] = {
+        "/sys/devices/system/cpu/cpu{}/topology/package_cpus",
+        "/sys/devices/system/cpu/cpu{}/topology/core_cpus",
+        "/sys/devices/system/cpu/cpu{}/topology/core_siblings",
+        "/sys/devices/system/cpu/cpu{}/topology/thread_siblings"
+    };
+
+    for (auto prop : cpux_properties) {
+        auto p = fmt::format(fmt::runtime(prop), 0);
+        if (is_readable_file(fmt::format(fmt::runtime(prop), 0))) {
+            return true;
+        }
+    }
+
+    // cpu0 might be offline, try to check first online cpu.
+    auto online = read_first_line_as<std::string>("/sys/devices/system/cpu/online");
+    static std::regex r("^\\d+");
+    std::smatch match;
+    if (std::regex_match(online, match, r)) {
+        auto cpu = boost::lexical_cast<unsigned>(match[0].str());
+        // skip checking since cpu0 is online
+        if (cpu == 0) {
+            return false;
+        }
+        for (auto prop : cpux_properties) {
+            auto p = fmt::format(fmt::runtime(prop), cpu);
+            if (is_readable_file(fmt::format(fmt::runtime(prop), cpu))) {
+                return true;
+            }
+        }
+    }
+#endif
+
+    return false;
+}
+
+static hwloc_uint64_t get_local_memory(hwloc_obj_t node) {
+#if 0
+#if HWLOC_API_VERSION >= 0x00020000
+     // FIXME: support nodes with multiple NUMA nodes, whatever that means
+     auto local_memory = node->total_memory;
+#else
+     auto local_memory = node->memory.local_memory;
+#endif
+    return local_memory;
+#endif
+    return 0;
+}
+
+static void set_local_memory(hwloc_obj_t node, hwloc_uint64_t local_memory) {
+#if HWLOC_API_VERSION >= 0x00020000
+    node->total_memory = local_memory;
+#else
+    node->memory.local_memory = local_memory;
+#endif
+}
+
+static void fixup_local_memory(hwloc_obj_t node) {
+    auto meminfo = read_first_line_as<std::string>(fmt::format("/sys/devices/system/node/node{}/meminfo", node->os_index));
+    seastar_logger.debug("meminfo:{}", meminfo);
+    static std::regex r(R"(^Node \d+ MemTotal: +(\d+) kB)");
+    std::smatch match;
+    if (std::regex_match(meminfo, match, r)) {
+        seastar_logger.debug("meminfo matched");
+        for (int i = 0; i < match.size(); i++) {
+            seastar_logger.debug("meminfo match[{}] = {}", i, match[i].str());
+        }
+        set_local_memory(node, std::stoull(match[1].str()));
+    }
+}
+
+#if 0
+static hwloc_uint64_t get_machine_memory(hwloc_obj_t machine) {
+#if 0
+#if HWLOC_API_VERSION >= 0x00020000
+    auto available_memory = machine->total_memory;
+#else
+    auto available_memory = machine->memory.total_memory;
+#endif
+    return available_memory;
+#endif
+    return 0;
+}
+
+static void set_machine_memory(hwloc_obj_t machine, hwloc_uint64_t available_memory) {
+#if HWLOC_API_VERSION >= 0x00020000
+    machine->total_memory = available_memory;
+#else
+    machine->memory.total_memory = available_memory;
+#endif
+}
+
+static void fixup_machine_memory(hwloc_obj_t machine) {
+    set_machine_memory(machine, ::sysconf(_SC_PAGESIZE) * size_t(::sysconf(_SC_PHYS_PAGES)));
+    seastar_logger.warn("hwloc failed to detect machine-wide memory size, using memory size fetched from sysconf");
+}
+#endif
+
+static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_map<hwloc_obj_t, size_t>& used_mem, size_t alloc) {
+    auto local_memory = get_local_memory(node);
     auto taken = std::min(local_memory - used_mem[node], alloc);
     if (taken) {
         used_mem[node] += taken;
@@ -579,11 +686,22 @@ resources allocate(configuration& c) {
 #else
     auto available_memory = machine->memory.total_memory;
 #endif
+    seastar_logger.debug("available_memory before:{}", machine->total_memory);
+/*
+    auto available_memory = get_machine_memory(machine);
+
+    if (!available_memory && !is_cpu_topology_available()) {
+        fixup_machine_memory(machine);
+        available_memory = get_machine_memory(machine);
+    }
+    seastar_logger.debug("available_memory after:{}", machine->total_memory);
+*/
     size_t mem = calculate_memory(c, std::min(available_memory,
                                               cgroup::memory_limit()));
     // limit memory address to fit in 36-bit, see core/memory.cc:Memory map
     constexpr size_t max_mem_per_proc = 1UL << 36;
     auto mem_per_proc = std::min(align_down<size_t>(mem / procs, 2 << 20), max_mem_per_proc);
+    seastar_logger.debug("mem:{} mem_per_proc:{}", mem, mem_per_proc);
 
     resources ret;
     std::unordered_map<unsigned, hwloc_obj_t> cpu_to_node;
@@ -601,6 +719,11 @@ resources allocate(configuration& c) {
         if (node == nullptr) {
             orphan_pus.push_back(cpu_id);
         } else {
+            seastar_logger.debug("local_memory{} before:{}", node->os_index, node->total_memory);
+            if (!get_local_memory(node) && !is_cpu_topology_available()) {
+                fixup_local_memory(node);
+            }
+            seastar_logger.debug("local_memory{} after:{}", node->os_index, node->total_memory);
             cpu_to_node[cpu_id] = node;
             seastar_logger.debug("Assign CPU{} to NUMA{}", cpu_id, node->os_index);
         }
