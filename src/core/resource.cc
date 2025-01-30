@@ -305,13 +305,43 @@ size_t div_roundup(size_t num, size_t denom) {
     return (num + denom - 1) / denom;
 }
 
-static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_map<hwloc_obj_t, size_t>& used_mem, size_t alloc) {
+static hwloc_uint64_t get_machine_memory(hwloc_obj_t machine) {
 #if HWLOC_API_VERSION >= 0x00020000
-    // FIXME: support nodes with multiple NUMA nodes, whatever that means
-    auto local_memory = node->total_memory;
+    auto available_memory = machine->total_memory;
 #else
-    auto local_memory = node->memory.local_memory;
+    auto available_memory = machine->memory.total_memory;
 #endif
+    return available_memory;
+}
+
+static void set_machine_memory(hwloc_obj_t machine, hwloc_uint64_t available_memory) {
+#if HWLOC_API_VERSION >= 0x00020000
+    machine->total_memory = available_memory;
+#else
+    machine->memory.total_memory = available_memory;
+#endif
+}
+
+static hwloc_uint64_t get_local_memory(hwloc_obj_t node) {
+#if HWLOC_API_VERSION >= 0x00020000
+     // FIXME: support nodes with multiple NUMA nodes, whatever that means
+     auto local_memory = node->total_memory;
+#else
+     auto local_memory = node->memory.local_memory;
+#endif
+    return local_memory;
+}
+
+static void set_local_memory(hwloc_obj_t node, hwloc_uint64_t local_memory) {
+#if HWLOC_API_VERSION >= 0x00020000
+    node->total_memory = local_memory;
+#else
+    node->memory.local_memory = local_memory;
+#endif
+}
+
+static size_t alloc_from_node(cpu& this_cpu, hwloc_obj_t node, std::unordered_map<hwloc_obj_t, size_t>& used_mem, size_t alloc) {
+    auto local_memory = get_local_memory(node);
     auto taken = std::min(local_memory - used_mem[node], alloc);
     if (taken) {
         used_mem[node] += taken;
@@ -574,11 +604,12 @@ resources allocate(configuration& c) {
     auto machine_depth = hwloc_get_type_depth(topology, HWLOC_OBJ_MACHINE);
     assert(hwloc_get_nbobjs_by_depth(topology, machine_depth) == 1);
     auto machine = hwloc_get_obj_by_depth(topology, machine_depth, 0);
-#if HWLOC_API_VERSION >= 0x00020000
-    auto available_memory = machine->total_memory;
-#else
-    auto available_memory = machine->memory.total_memory;
-#endif
+    auto available_memory = get_machine_memory(machine);
+    if (!available_memory) {
+        available_memory = ::sysconf(_SC_PAGESIZE) * size_t(::sysconf(_SC_PHYS_PAGES));
+        set_machine_memory(machine, available_memory);
+        seastar_logger.warn("hwloc failed to detect machine-wide memory size, using memory size fetched from sysconf");
+    }
     size_t mem = calculate_memory(c, std::min(available_memory,
                                               cgroup::memory_limit()));
     // limit memory address to fit in 36-bit, see core/memory.cc:Memory map
@@ -592,6 +623,7 @@ resources allocate(configuration& c) {
     std::vector<std::pair<cpu, size_t>> remains;
 
     auto cpu_sets = distribute_objects(topology, procs);
+    auto num_nodes = hwloc_get_nbobjs_by_type(topology, HWLOC_OBJ_NUMANODE);
 
     for (auto&& cs : cpu_sets()) {
         auto cpu_id = hwloc_bitmap_first(cs);
@@ -601,6 +633,16 @@ resources allocate(configuration& c) {
         if (node == nullptr) {
             orphan_pus.push_back(cpu_id);
         } else {
+            if (!get_local_memory(node)) {
+                // This code does not assume that there are multiple nodes,
+                // but when this 'if' condition is met, hwloc fails to detect
+                // the hardware configuration and is expected to operate as
+                // a single node configuration, so it should work correctly.
+                assert(num_nodes == 1);
+                auto local_memory = ::sysconf(_SC_PAGESIZE) * size_t(::sysconf(_SC_PHYS_PAGES));
+                set_local_memory(node, local_memory);
+                seastar_logger.warn("hwloc failed to detect NUMA node memory size, using memory size fetched from sysfs");
+            }
             cpu_to_node[cpu_id] = node;
             seastar_logger.debug("Assign CPU{} to NUMA{}", cpu_id, node->os_index);
         }
